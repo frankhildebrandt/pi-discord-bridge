@@ -1,5 +1,7 @@
 # Phase 5 – Admin & Betrieb
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Die Bridge soll sicher und stabil betreibbar werden. Discord-Admin-Kommandos dürfen Sessions und Betrieb steuern, aber niemals Modell oder Thinking-Level ändern.

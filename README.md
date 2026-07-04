@@ -2,14 +2,15 @@
 
 Discord-Bridge für pi.dev als pi-Extension und als Standalone-Bridge-Daemon.
 
-Aktueller Stand: **Phasen 1–6 implementiert, Phase 7–9 offen**.
+Aktueller Stand: **Phasen 1–9 implementiert**. Verbleibende Folgearbeiten stehen in [`TODO.md`](./TODO.md).
 
-- Extension-Modus: Single-Session-Textchannels.
-- Bridge-Daemon: Discord-Arbeitsforen, ein Thread = eine pi-Session.
-- Optionales Knowledgebase-Forum mit lokalem Markdown-Index und Keyword-Retrieval.
+- Extension-Modus: Single-Session-Textchannels im laufenden pi-Prozess.
+- Bridge-Daemon: Discord-Arbeitsforen und normale Textchannels als eigene Routen/Sessions.
+- Optionales Knowledgebase-Forum mit lokalem Markdown-Index, Attachment-Indexierung und Keyword/BM25-artigem Retrieval.
 - Discord-gerechtes Rendering mit Chunks, Embeds und Markdown-Attachments.
+- Optionales, gedrosseltes Streaming nach Discord und optionale Tool-Event-Cards.
 - Discord-Anhänge als Prompt-Kontext: kleine Text-/Markdown-/Code-Dateien werden eingebettet, Bilder als Links/Metadaten weitergereicht.
-- Admin-Kommandos, Rate-Limit-Queue und Secret-Redaction.
+- Admin-Kommandos, Rate-Limit-Queue, Idle-Dispose/Resume und Secret-Redaction.
 
 ## Installation
 
@@ -50,7 +51,7 @@ Minimal für den Extension-Modus:
 }
 ```
 
-Beispiel für Forum-Bridge plus Knowledgebase und Attachment-Verarbeitung:
+Umfangreicheres Beispiel für Daemon, Forum, Knowledgebase, Attachments und Streaming:
 
 ```json
 {
@@ -62,7 +63,13 @@ Beispiel für Forum-Bridge plus Knowledgebase und Attachment-Verarbeitung:
   "requireMention": false,
   "prefix": "!pi",
   "maxConcurrentSessions": 3,
+  "idleDisposeMs": 1800000,
   "channels": [
+    {
+      "channelId": "111111111111111111",
+      "mode": "single-session",
+      "sessionName": "discord-main"
+    },
     {
       "channelId": "222222222222222222",
       "mode": "forum",
@@ -75,9 +82,18 @@ Beispiel für Forum-Bridge plus Knowledgebase und Attachment-Verarbeitung:
       "maxContextThreads": 5
     }
   ],
+  "knowledgebase": {
+    "downloadAttachments": true,
+    "maxAttachmentBytes": 262144,
+    "enableVectorSearch": false,
+    "maxStoredThreadChars": 500000
+  },
   "discord": {
     "sendTyping": true,
     "streamUpdates": false,
+    "streamUpdateIntervalMs": 5000,
+    "postToolEvents": false,
+    "maxToolOutputChars": 4000,
     "maxMessageChars": 1900,
     "maxCodeCharsInline": 900,
     "largeCodeAsAttachment": true,
@@ -86,7 +102,14 @@ Beispiel für Forum-Bridge plus Knowledgebase und Attachment-Verarbeitung:
     "allowedAttachmentMimeTypes": [
       "text/plain",
       "text/markdown",
+      "text/csv",
       "application/json",
+      "application/xml",
+      "text/xml",
+      "text/yaml",
+      "application/yaml",
+      "application/x-yaml",
+      "application/javascript",
       "text/javascript",
       "text/css",
       "text/html",
@@ -141,13 +164,14 @@ Ablauf:
 2. Die Extension verbindet sich mit Discord.
 3. Nachrichten in konfigurierten `single-session` Channels werden nach Prefix/Mention/User-/Rollenprüfung als pi-Prompt gesendet.
 4. Text-/Code-Attachments werden bei erlaubtem Typ und passender Größe in den Prompt eingebettet; Bilder werden als Links/Metadaten ergänzt.
-5. Die finale Assistant-Antwort wird nach Discord gerendert.
+5. Optional werden Streaming-Updates und Tool-Event-Cards gepostet.
+6. Die finale Assistant-Antwort wird vollständig nach Discord gerendert.
 
 Hinweis: Wenn `prefix` gesetzt ist, müssen auch Nachrichten mit Attachments den Prefix enthalten. Attachment-only Nachrichten funktionieren ohne Prefix-Config oder mit gültiger Mention-Konfiguration.
 
-## Nutzung: Bridge-Daemon für Foren
+## Nutzung: Bridge-Daemon für Textchannels und Foren
 
-Der Daemon ist der bevorzugte Modus für Discord-Foren mit mehreren parallelen Threads.
+Der Daemon ist der bevorzugte Modus für mehrere parallele Discord-Routen: normale Textchannels (`single-session`) und Arbeitsforen (`forum`).
 
 ```bash
 npm run bridge
@@ -155,17 +179,20 @@ npm run bridge
 
 Ablauf:
 
-- Jeder Thread eines konfigurierten `forum` Channels bekommt eine eigene pi-Session.
+- Jeder konfigurierte `single-session` Textchannel bekommt eine eigene pi-Session mit Route-Key `discord:guild:<guildId>:channel:<channelId>`.
+- Jeder Thread eines konfigurierten `forum` Channels bekommt eine eigene pi-Session mit Route-Key `discord:guild:<guildId>:forum:<forumId>:thread:<threadId>`.
 - Mapping wird persistent gespeichert unter:
 
 ```text
 ~/.pi/agent/discord-bridge-sessions.json
 ```
 
-- Pro Thread werden Nachrichten sequentiell verarbeitet.
-- Mehrere Threads laufen parallel bis `maxConcurrentSessions`.
-- Der Thread-Titel wird als pi-Session-Name verwendet.
-- Attachments aus Arbeits-Threads werden wie im Extension-Modus in den Prompt aufgenommen.
+- Pro Route werden Nachrichten sequentiell verarbeitet.
+- Mehrere Routen laufen parallel bis `maxConcurrentSessions`.
+- Der Thread-Titel bzw. `sessionName` aus der Channel-Config wird als pi-Session-Name verwendet.
+- Inaktive Sessions werden nach `idleDisposeMs` disposed, das Mapping bleibt erhalten und wird bei neuer Aktivität aus der Session-Datei wieder geöffnet.
+- Archivierte Threads werden nicht gelöscht; aktive Sessions werden disposed und bei neuer Aktivität/Unarchive wieder geöffnet.
+- Attachments aus Arbeits-Routen werden wie im Extension-Modus in den Prompt aufgenommen.
 
 ## Knowledgebase-Forum
 
@@ -174,12 +201,20 @@ Channels mit `mode: "knowledgebase"` werden nicht als Arbeits-Threads benutzt. S
 ```text
 ~/.pi/agent/discord-bridge-kb/
 ├── index.json
-└── threads/<threadId>.md
+├── threads/<threadId>.md
+└── vectors/
 ```
 
-Bei Prompts in Arbeitschannels/-threads sucht die Bridge relevante KB-Threads per Keyword-Scoring und injiziert kurze Auszüge plus Quellenlinks in den Prompt.
+Bei Prompts in Arbeitschannels/-threads sucht die Bridge relevante KB-Threads und injiziert kurze Auszüge plus Quellenlinks in den Prompt.
 
-Aktuell werden KB-Thread-Nachrichten und Attachment-Links erfasst; KB-Attachments werden noch nicht inhaltlich heruntergeladen und indexiert.
+Aktuell umgesetzt:
+
+- KB-Thread-Nachrichten werden normalisiert und indexiert.
+- Erlaubte Text-/Markdown-/Code-Attachments aus KB-Threads werden heruntergeladen und in das Thread-Markdown integriert.
+- Nicht unterstützte oder zu große Anhänge werden verlinkt.
+- Suchtreffer enthalten Thread-ID, Pfad, Quellenlink und Score.
+- Volltext kann kontrolliert per `loadDocument(threadId)` nachgeladen werden.
+- Vektorsuche ist providerunabhängig vorbereitet; ohne konkrete Embedding-Integration bleibt Keyword/BM25-Fallback aktiv.
 
 ## Attachment-Verarbeitung
 
@@ -194,11 +229,13 @@ Gemeinsame Logik in `src/attachments.ts`:
 
 Wichtige Config-Werte:
 
-- `discord.downloadAttachments` – Downloads aktivieren/deaktivieren, Default `true`.
-- `discord.maxAttachmentBytes` – maximale Downloadgröße, Default `262144`.
+- `discord.downloadAttachments` – Downloads für Arbeits-Prompts aktivieren/deaktivieren, Default `true`.
+- `discord.maxAttachmentBytes` – maximale Downloadgröße für Arbeits-Prompts, Default `262144`.
 - `discord.allowedAttachmentMimeTypes` – erlaubte MIME-Typen.
+- `knowledgebase.downloadAttachments` – Downloads für KB-Indexierung aktivieren/deaktivieren.
+- `knowledgebase.maxAttachmentBytes` – maximale Downloadgröße für KB-Indexierung.
 
-## Rendering
+## Rendering, Streaming und Tool-Events
 
 Antworten werden Discord-konform gerendert:
 
@@ -206,15 +243,18 @@ Antworten werden Discord-konform gerendert:
 - Kurze Codeblöcke werden als Embeds/Cards gesendet.
 - Lange Codeblöcke und sehr lange Antworten werden als `.md` Attachment ausgelagert.
 - Fehler werden als Embed gepostet.
-- Tool-Status-Renderer ist vorhanden; Event-Posting für Tool-Events ist noch nicht vollständig verdrahtet.
+- Bei `discord.streamUpdates: true` werden Assistant-Deltas gedrosselt in eine Discord-Statusnachricht geschrieben.
+- `discord.streamUpdateIntervalMs` steuert das Mindestintervall der Edits, Default `5000`.
+- Bei `discord.postToolEvents: true` werden Tool-Start/-Ende als kompakte Cards gepostet.
+- `discord.maxToolOutputChars` begrenzt Tool-Ausgaben, große Logs werden über den Renderer gekürzt/ausgelagert.
 
 ## Admin-Kommandos im Daemon
 
 Der Daemon registriert `/pi` Slash Commands:
 
 - `/pi status` – Sessions, Queues und Metriken anzeigen
-- `/pi reset` – neue Session für aktuellen Arbeits-Thread erzeugen
-- `/pi compact` – aktuelle Thread-Session kompaktieren
+- `/pi reset` – neue Session für aktuelle Route erzeugen
+- `/pi compact` – aktuelle Route-Session kompaktieren
 - `/pi abort` – laufende Bearbeitung abbrechen
 - `/pi help` – Hilfe anzeigen
 
@@ -228,18 +268,13 @@ Modell, Provider, Thinking-Level und API-Keys können über Discord weder gelese
 - Projektlokale Config wird nur bei trusted project gelesen.
 - Redaction für bekannte Secret-Muster und optionale eigene Regexe (`redactionPatterns`).
 - Attachment-Downloads sind typ- und größengeprüft.
+- Discord-Kommandos können keine Modell-/Provider-/Thinking-/API-Key-Konfiguration ändern.
 
 ## Aktuelle Einschränkungen
 
-Nicht alle Punkte aus `DESIGN.md` sind vollständig umgesetzt:
-
 - Bildanhänge werden noch nicht multimodal an pi übergeben, sondern als Link/Metadaten.
-- Streaming nach Discord ist nur gepuffert vorbereitet; produktiv wird final nach `message_end`/Session-Antwort gepostet.
-- Tool-Execution-Events werden noch nicht automatisch nach Discord gepostet.
-- Knowledgebase nutzt Keyword-Scoring, keine Embeddings/Vektorindexe.
-- Knowledgebase lädt Anhänge nicht inhaltlich herunter, sondern verlinkt sie.
-- Archivierungs-/Idle-Dispose-Verhalten für Forum-Threads ist rudimentär.
-- Klassische Textchannels im Daemon sind nicht als eigene Multi-Session-Routen umgesetzt; dafür gibt es den Extension-Modus.
+- Vektorsuche ist nur als providerunabhängiger Stub vorbereitet; ohne lokale Embedding-Integration bleibt Keyword/BM25-Fallback aktiv.
+- Tests und CI sind noch ausbaufähig.
 
 ## Entwicklung
 

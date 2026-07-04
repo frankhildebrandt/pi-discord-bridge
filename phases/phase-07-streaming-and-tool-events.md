@@ -1,5 +1,7 @@
 # Phase 7 – Streaming und Tool-Events nach Discord
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Antworten sollen optional während der Generierung sichtbar werden, ohne Discord-Rate-Limits zu verletzen. Zusätzlich sollen Tool-Ausführungen (`read`, `bash`, `edit`, usw.) als kompakte Status-Cards gepostet werden können.

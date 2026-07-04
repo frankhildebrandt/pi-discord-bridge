@@ -1,5 +1,7 @@
 # Phase 8 – Knowledgebase: Anhänge, Volltext und optionale Vektorsuche
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Das Knowledgebase-Forum soll über die aktuelle Keyword-Suche hinausgehen: Anhänge sollen inhaltlich indexiert werden, vollständige Thread-Inhalte sollen bei Bedarf nachladbar sein, und eine optionale Embedding-/Vektorsuche soll vorbereitet oder implementiert werden.

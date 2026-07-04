@@ -1,5 +1,7 @@
 # Phase 6 – Discord Input: Attachments, Dateien und Bilder
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Discord-Nachrichten sollen nicht nur reinen Text, sondern auch Anhänge an pi weiterreichen. Textdateien sollen als Inhalt in den Prompt übernommen werden, Bilder sollen – soweit pi/Provider multimodale Eingaben unterstützt – sichtbar an die Agent-Session übergeben oder zumindest sauber referenziert werden.

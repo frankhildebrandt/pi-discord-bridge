@@ -1,5 +1,7 @@
 # Phase 9 – Session-Lifecycle und Daemon-Routing für Textchannels
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Der Bridge-Daemon soll neben Forum-Threads auch normale Textchannels als eigene Routen unterstützen. Zusätzlich soll der Lifecycle von Forum-Thread-Sessions robuster werden: Idle-Dispose, Reopen/Resume und Archivierungsverhalten.

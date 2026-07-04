@@ -9,10 +9,20 @@ const DEFAULT_CONFIG: DiscordBridgeConfig = {
   allowedUserIds: [],
   allowedRoleIds: [],
   requireMention: false,
+  idleDisposeMs: 30 * 60 * 1000,
   channels: [],
+  knowledgebase: {
+    downloadAttachments: true,
+    maxAttachmentBytes: 262144,
+    enableVectorSearch: false,
+    maxStoredThreadChars: 500000,
+  },
   discord: {
     sendTyping: true,
     streamUpdates: false,
+    streamUpdateIntervalMs: 5000,
+    postToolEvents: false,
+    maxToolOutputChars: 4000,
     maxMessageChars: 1900,
     maxCodeCharsInline: 900,
     largeCodeAsAttachment: true,
@@ -51,6 +61,10 @@ function mergeConfig(base: DiscordBridgeConfig, override: Partial<DiscordBridgeC
     allowedUserIds: override.allowedUserIds ?? base.allowedUserIds,
     allowedRoleIds: override.allowedRoleIds ?? base.allowedRoleIds,
     channels: override.channels ?? base.channels,
+    knowledgebase: {
+      ...(base.knowledgebase ?? {}),
+      ...(override.knowledgebase ?? {}),
+    },
     discord: {
       ...base.discord,
       ...(override.discord ?? {}),

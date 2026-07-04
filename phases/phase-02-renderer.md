@@ -1,5 +1,7 @@
 # Phase 2 – Renderer: Chat/Card zuerst, Markdown-Fallback
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Der Discord-Renderer soll Antworten möglichst direkt als Chat-Nachrichten oder Discord-Cards/Embeds abbilden. Nur wenn Inhalte zu lang oder zu komplex sind, werden Markdown-Dateien als Attachments erzeugt.

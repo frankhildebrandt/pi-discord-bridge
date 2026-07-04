@@ -10,8 +10,11 @@ import {
 } from "discord.js";
 import { normalizeDiscordAttachments } from "./attachments.js";
 import { loadConfig } from "./config.js";
+import { sendPayloadsQueued, StreamingDiscordResponse } from "./discord-output.js";
 import { DiscordKnowledgebase } from "./knowledgebase.js";
-import { renderDiscordMessages, renderErrorMessage } from "./renderer.js";
+import { DiscordSendQueue } from "./rate-limit.js";
+import { redactSecrets } from "./redaction.js";
+import { renderDiscordMessages, renderErrorMessage, renderToolStatusMessage } from "./renderer.js";
 import type { DiscordBridgeConfig, KnowledgebaseChannelConfig, SingleSessionChannelConfig } from "./types.js";
 
 function getTextFromAssistantMessage(message: unknown): string {
@@ -89,12 +92,6 @@ function discordMessageUrl(message: Message): string {
   return `https://discord.com/channels/${message.guildId ?? "@me"}/${message.channelId}/${message.id}`;
 }
 
-async function sendPayloads(channel: SendableChannel, payloads: ReturnType<typeof renderDiscordMessages>) {
-  for (const payload of payloads) {
-    await channel.send(payload);
-  }
-}
-
 async function resolveFullMessage(message: Message | PartialMessage): Promise<Message | undefined> {
   if (!message.partial) return message as Message;
   return message.fetch().catch(() => undefined);
@@ -106,6 +103,8 @@ export default function discordBridge(pi: ExtensionAPI) {
   let activeResponseChannel: SendableChannel | undefined;
   let activeSourceLinks: string[] = [];
   let currentAssistantText = "";
+  const sendQueue = new DiscordSendQueue();
+  let streamer: StreamingDiscordResponse | undefined;
 
   pi.on("session_start", async (_event, ctx) => {
     config = loadConfig({ cwd: ctx.cwd, projectTrusted: ctx.isProjectTrusted() });
@@ -119,7 +118,11 @@ export default function discordBridge(pi: ExtensionAPI) {
 
     const singleSessionChannels = getSingleSessionChannels(config);
     const knowledgebaseChannels = getKnowledgebaseChannels(config);
-    const knowledgebase = new DiscordKnowledgebase();
+    const knowledgebase = new DiscordKnowledgebase({
+      config: config.knowledgebase,
+      discord: config.discord,
+      redactionPatterns: config.redactionPatterns,
+    });
     if (singleSessionChannels.size === 0) {
       ctx.ui.notify("Discord bridge: keine single-session Channels konfiguriert", "warning");
       return;
@@ -161,6 +164,7 @@ export default function discordBridge(pi: ExtensionAPI) {
 
         if (!canSend(message.channel)) return;
         activeResponseChannel = message.channel;
+        streamer = config.discord.streamUpdates ? new StreamingDiscordResponse(message.channel, sendQueue, config.discord) : undefined;
         if (config.discord.sendTyping && "sendTyping" in message.channel) {
           await message.channel.sendTyping();
         }
@@ -209,11 +213,34 @@ export default function discordBridge(pi: ExtensionAPI) {
   });
 
   pi.on("message_update", (event) => {
-    if (!config?.discord.streamUpdates) return;
     if (event.message.role !== "assistant") return;
     if (event.assistantMessageEvent.type === "text_delta") {
       currentAssistantText += event.assistantMessageEvent.delta;
+      if (config?.discord.streamUpdates) streamer?.append(redactSecrets(event.assistantMessageEvent.delta, config.redactionPatterns));
     }
+  });
+
+  pi.on("tool_execution_start", async (event) => {
+    if (!config?.discord.postToolEvents || !activeResponseChannel) return;
+    const typed = event as unknown as { toolName?: string; name?: string };
+    await sendPayloadsQueued(sendQueue, activeResponseChannel, renderToolStatusMessage({
+      toolName: typed.toolName ?? typed.name ?? "tool",
+      status: "running",
+      summary: "Tool wird ausgeführt…",
+    }, config.discord)).catch(() => undefined);
+  });
+
+  pi.on("tool_execution_end", async (event) => {
+    if (!config?.discord.postToolEvents || !activeResponseChannel) return;
+    const typed = event as unknown as { toolName?: string; name?: string; error?: unknown; result?: unknown; output?: unknown };
+    const rawOutput = typeof typed.output === "string" ? typed.output : typeof typed.result === "string" ? typed.result : typed.result ? JSON.stringify(typed.result) : undefined;
+    const output = rawOutput ? redactSecrets(rawOutput.slice(0, config.discord.maxToolOutputChars ?? 4000), config.redactionPatterns) : undefined;
+    await sendPayloadsQueued(sendQueue, activeResponseChannel, renderToolStatusMessage({
+      toolName: typed.toolName ?? typed.name ?? "tool",
+      status: typed.error ? "error" : "success",
+      summary: typed.error ? redactSecrets(String(typed.error), config.redactionPatterns) : "Tool abgeschlossen.",
+      output,
+    }, config.discord)).catch(() => undefined);
   });
 
   pi.on("message_end", async (event, ctx) => {
@@ -224,13 +251,14 @@ export default function discordBridge(pi: ExtensionAPI) {
     try {
       const text = getTextFromAssistantMessage(event.message) || currentAssistantText;
       currentAssistantText = "";
+      await streamer?.finish();
       if (!text.trim()) return;
-      await sendPayloads(activeResponseChannel, renderDiscordMessages(text, config.discord, { title: "pi Antwort", sourceLinks: activeSourceLinks }));
+      await sendPayloadsQueued(sendQueue, activeResponseChannel, renderDiscordMessages(redactSecrets(text, config.redactionPatterns), config.discord, { title: "pi Antwort", sourceLinks: activeSourceLinks }));
       activeSourceLinks = [];
     } catch (error) {
       ctx.ui.notify(`Discord bridge output error: ${error instanceof Error ? error.message : String(error)}`, "error");
       try {
-        await sendPayloads(activeResponseChannel, renderErrorMessage(error) as ReturnType<typeof renderDiscordMessages>);
+        await sendPayloadsQueued(sendQueue, activeResponseChannel, renderErrorMessage(redactSecrets(error instanceof Error ? error.message : String(error), config.redactionPatterns)) as ReturnType<typeof renderDiscordMessages>);
       } catch {
         // ignore nested Discord send failures
       }
@@ -241,6 +269,8 @@ export default function discordBridge(pi: ExtensionAPI) {
     activeResponseChannel = undefined;
     activeSourceLinks = [];
     currentAssistantText = "";
+    streamer?.reset();
+    streamer = undefined;
     if (client) {
       await client.destroy();
       client = undefined;

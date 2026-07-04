@@ -1,5 +1,7 @@
 # Phase 4 – Knowledgebase-Forum
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Ein zweites Discord-Forum dient als Knowledgebase. Dieses Forum erzeugt keine Arbeits-Sessions, sondern wird gelesen, normalisiert, lokal gespeichert, indexiert und bei passenden Prompts als Kontext genutzt.

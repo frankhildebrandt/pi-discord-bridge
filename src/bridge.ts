@@ -10,16 +10,18 @@ import {
   type ChatInputCommandInteraction,
   type Message,
   type PartialMessage,
+  type TextBasedChannel,
   type ThreadChannel,
 } from "discord.js";
 import { normalizeDiscordAttachments } from "./attachments.js";
 import { loadConfig } from "./config.js";
+import { sendPayloadsQueued, StreamingDiscordResponse } from "./discord-output.js";
 import { DiscordKnowledgebase } from "./knowledgebase.js";
-import { PiSessionPool, buildForumRouteKey, type SessionRouteMetadata } from "./pi-session-pool.js";
+import { PiSessionPool, buildForumRouteKey, buildTextChannelRouteKey, type SessionRouteMetadata } from "./pi-session-pool.js";
 import { DiscordSendQueue } from "./rate-limit.js";
 import { redactSecrets } from "./redaction.js";
-import { renderDiscordMessages, renderErrorMessage, type RenderedDiscordPayload } from "./renderer.js";
-import type { DiscordBridgeConfig, ForumChannelConfig, KnowledgebaseChannelConfig } from "./types.js";
+import { renderDiscordMessages, renderErrorMessage, renderToolStatusMessage, type RenderedDiscordPayload } from "./renderer.js";
+import type { DiscordBridgeConfig, ForumChannelConfig, KnowledgebaseChannelConfig, SingleSessionChannelConfig } from "./types.js";
 
 const DEFAULT_MAX_CONCURRENT_SESSIONS = 3;
 
@@ -30,7 +32,7 @@ interface Metrics {
   startedAt: Date;
 }
 
-type SendableChannel = ThreadChannel & { send: (payload: string | RenderedDiscordPayload) => Promise<Message> };
+type SendableChannel = TextBasedChannel & { send: (payload: string | RenderedDiscordPayload) => Promise<Message> };
 
 function log(level: "info" | "warn" | "error", message: string, meta: Record<string, unknown> = {}) {
   console[level](JSON.stringify({ ts: new Date().toISOString(), level, message, ...meta }));
@@ -105,6 +107,12 @@ function getForumChannels(config: DiscordBridgeConfig): Map<string, ForumChannel
   return channels;
 }
 
+function getSingleSessionChannels(config: DiscordBridgeConfig): Map<string, SingleSessionChannelConfig> {
+  const channels = new Map<string, SingleSessionChannelConfig>();
+  for (const channel of config.channels) if (channel.mode === "single-session") channels.set(channel.channelId, channel);
+  return channels;
+}
+
 function getKnowledgebaseChannels(config: DiscordBridgeConfig): Map<string, KnowledgebaseChannelConfig> {
   const channels = new Map<string, KnowledgebaseChannelConfig>();
   for (const channel of config.channels) if (channel.mode === "knowledgebase") channels.set(channel.channelId, channel);
@@ -163,6 +171,16 @@ function getInteractionThread(interaction: ChatInputCommandInteraction): ThreadC
   return channel;
 }
 
+function canSend(channel: Message["channel"]): channel is SendableChannel {
+  return "send" in channel && typeof channel.send === "function";
+}
+
+function interactionSendableChannel(interaction: ChatInputCommandInteraction): SendableChannel | undefined {
+  const channel = interaction.channel;
+  if (!channel || !("send" in channel) || typeof channel.send !== "function") return undefined;
+  return channel as SendableChannel;
+}
+
 function makeSessionName(forum: ForumChannelConfig, thread: ThreadChannel): string {
   return `${forum.sessionNamePrefix ?? "forum-"}${thread.name}`.slice(0, 100);
 }
@@ -172,11 +190,25 @@ function makeRouteMetadata(message: Message, forum: ForumChannelConfig, thread: 
   const forumId = thread.parentId ?? forum.channelId;
   return {
     routeKey: buildForumRouteKey({ guildId, forumId, threadId: thread.id }),
+    kind: "forum-thread",
     guildId,
     forumId,
     threadId: thread.id,
     threadName: thread.name,
     sessionName: makeSessionName(forum, thread),
+  };
+}
+
+function makeTextRouteMetadata(message: Message, channelConfig: SingleSessionChannelConfig): SessionRouteMetadata {
+  const guildId = message.guild?.id ?? "unknown";
+  const channelName = "name" in message.channel && typeof message.channel.name === "string" ? message.channel.name : message.channelId;
+  return {
+    routeKey: buildTextChannelRouteKey({ guildId, channelId: message.channelId }),
+    kind: "text-channel",
+    guildId,
+    channelId: message.channelId,
+    channelName,
+    sessionName: channelConfig.sessionName ?? `channel-${channelName}`,
   };
 }
 
@@ -185,6 +217,7 @@ function makeInteractionRouteMetadata(interaction: ChatInputCommandInteraction, 
   const forumId = thread.parentId ?? forum.channelId;
   return {
     routeKey: buildForumRouteKey({ guildId, forumId, threadId: thread.id }),
+    kind: "forum-thread",
     guildId,
     forumId,
     threadId: thread.id,
@@ -193,41 +226,56 @@ function makeInteractionRouteMetadata(interaction: ChatInputCommandInteraction, 
   };
 }
 
+function makeTextInteractionRouteMetadata(interaction: ChatInputCommandInteraction, channelConfig: SingleSessionChannelConfig): SessionRouteMetadata {
+  const guildId = interaction.guildId ?? "unknown";
+  const channel = interaction.channel;
+  const channelName = channel && "name" in channel && typeof channel.name === "string" ? channel.name : interaction.channelId;
+  return {
+    routeKey: buildTextChannelRouteKey({ guildId, channelId: interaction.channelId }),
+    kind: "text-channel",
+    guildId,
+    channelId: interaction.channelId,
+    channelName,
+    sessionName: channelConfig.sessionName ?? `channel-${channelName}`,
+  };
+}
+
 function discordMessageUrl(message: Message): string {
   return `https://discord.com/channels/${message.guildId ?? "@me"}/${message.channelId}/${message.id}`;
 }
 
-function initialContext(message: Message, thread: ThreadChannel, forum: ForumChannelConfig): string {
-  return [
-    "Discord-Arbeitsforum-Kontext:",
+function initialContext(message: Message, metadata: SessionRouteMetadata): string {
+  const lines = [
+    metadata.kind === "forum-thread" ? "Discord-Arbeitsforum-Kontext:" : "Discord-Textchannel-Kontext:",
     `- Guild: ${message.guild?.name ?? message.guildId ?? "unknown"} (${message.guildId ?? "unknown"})`,
-    `- Forum: ${thread.parent?.name ?? forum.channelId} (${forum.channelId})`,
-    `- Thread: ${thread.name} (${thread.id})`,
-    `- Autor: ${message.author.tag} (${message.author.id})`,
-    `- Link: ${discordMessageUrl(message)}`,
-  ].join("\n");
+  ];
+  if (metadata.kind === "forum-thread") {
+    lines.push(`- Forum: ${metadata.forumId ?? "unknown"}`, `- Thread: ${metadata.threadName ?? metadata.threadId} (${metadata.threadId ?? "unknown"})`);
+  } else {
+    lines.push(`- Channel: ${metadata.channelName ?? metadata.channelId} (${metadata.channelId ?? "unknown"})`);
+  }
+  lines.push(`- Autor: ${message.author.tag} (${message.author.id})`, `- Link: ${discordMessageUrl(message)}`);
+  return lines.join("\n");
 }
 
 function buildPrompt(
   message: Message,
-  thread: ThreadChannel,
-  forum: ForumChannelConfig,
+  metadata: SessionRouteMetadata,
   content: string,
   includeInitialContext: boolean,
   knowledgebaseContext?: string,
   attachmentSection?: string,
 ): string {
+  const routeLabel = metadata.kind === "forum-thread"
+    ? `Thread ${metadata.threadName ?? metadata.threadId}`
+    : `Channel ${metadata.channelName ?? metadata.channelId}`;
   return [
-    includeInitialContext ? initialContext(message, thread, forum) : undefined,
+    includeInitialContext ? initialContext(message, metadata) : undefined,
     knowledgebaseContext,
-    `Discord-Nachricht von ${message.author.tag} im Thread ${thread.name}:`,
+    `Discord-Nachricht von ${message.author.tag} im ${routeLabel}:`,
     content.trim() || "_(kein Nachrichtentext)_",
     attachmentSection,
   ].filter((part): part is string => Boolean(part)).join("\n\n");
-}
-
-async function sendPayloads(sendQueue: DiscordSendQueue, channel: SendableChannel, payloads: RenderedDiscordPayload[]) {
-  for (const payload of payloads) await sendQueue.enqueue(() => channel.send(payload));
 }
 
 async function indexKnowledgebaseMessage(message: Message, knowledgebase: DiscordKnowledgebase, knowledgebaseChannels: Map<string, KnowledgebaseChannelConfig>): Promise<boolean> {
@@ -240,6 +288,64 @@ async function indexKnowledgebaseMessage(message: Message, knowledgebase: Discor
 async function resolveFullMessage(message: Message | PartialMessage): Promise<Message | undefined> {
   if (!message.partial) return message as Message;
   return message.fetch().catch(() => undefined);
+}
+
+type SubscribableSession = {
+  subscribe: (listener: (event: unknown) => void) => () => void;
+};
+
+function extractToolOutput(event: unknown, maxChars: number, redactionPatterns?: string[]): string | undefined {
+  const typed = event as { output?: unknown; result?: unknown };
+  const raw = typeof typed.output === "string" ? typed.output : typeof typed.result === "string" ? typed.result : typed.result ? JSON.stringify(typed.result) : undefined;
+  return raw ? redactSecrets(raw.slice(0, maxChars), redactionPatterns) : undefined;
+}
+
+function bindSessionDiscordEvents(input: {
+  routeKey: string;
+  session: SubscribableSession;
+  channel: SendableChannel;
+  config: DiscordBridgeConfig;
+  sendQueue: DiscordSendQueue;
+  streamers: Map<string, StreamingDiscordResponse>;
+  subscriptions: Map<string, () => void>;
+}) {
+  const { routeKey, session, channel, config, sendQueue, streamers, subscriptions } = input;
+  if (subscriptions.has(routeKey)) return;
+  const unsubscribe = session.subscribe((event: unknown) => {
+    const typed = event as { type?: string; message?: { role?: string }; assistantMessageEvent?: { type?: string; delta?: string }; toolName?: string; name?: string; error?: unknown };
+    if (typed.type === "message_update" && typed.message?.role === "assistant" && typed.assistantMessageEvent?.type === "text_delta") {
+      if (!config.discord.streamUpdates) return;
+      let streamer = streamers.get(routeKey);
+      if (!streamer) {
+        streamer = new StreamingDiscordResponse(channel, sendQueue, config.discord);
+        streamers.set(routeKey, streamer);
+      }
+      streamer.append(redactSecrets(typed.assistantMessageEvent.delta ?? "", config.redactionPatterns));
+      return;
+    }
+    if (typed.type === "message_end" && typed.message?.role === "assistant") {
+      void streamers.get(routeKey)?.finish();
+      return;
+    }
+    if (!config.discord.postToolEvents) return;
+    if (typed.type === "tool_execution_start") {
+      void sendPayloadsQueued(sendQueue, channel, renderToolStatusMessage({
+        toolName: typed.toolName ?? typed.name ?? "tool",
+        status: "running",
+        summary: "Tool wird ausgeführt…",
+      }, config.discord)).catch(() => undefined);
+      return;
+    }
+    if (typed.type === "tool_execution_end") {
+      void sendPayloadsQueued(sendQueue, channel, renderToolStatusMessage({
+        toolName: typed.toolName ?? typed.name ?? "tool",
+        status: typed.error ? "error" : "success",
+        summary: typed.error ? redactSecrets(String(typed.error), config.redactionPatterns) : "Tool abgeschlossen.",
+        output: extractToolOutput(event, config.discord.maxToolOutputChars ?? 4000, config.redactionPatterns),
+      }, config.discord)).catch(() => undefined);
+    }
+  });
+  subscriptions.set(routeKey, unsubscribe);
 }
 
 function slashCommands() {
@@ -270,13 +376,16 @@ async function handleAdminCommand(input: {
   interaction: ChatInputCommandInteraction;
   config: DiscordBridgeConfig;
   forumChannels: Map<string, ForumChannelConfig>;
+  singleSessionChannels: Map<string, SingleSessionChannelConfig>;
   pool: PiSessionPool;
   queues: Map<string, ThreadQueue>;
   semaphore: Semaphore;
   sendQueue: DiscordSendQueue;
   metrics: Metrics;
+  streamers: Map<string, StreamingDiscordResponse>;
+  subscriptions: Map<string, () => void>;
 }) {
-  const { interaction, config, forumChannels, pool, queues, semaphore, sendQueue, metrics } = input;
+  const { interaction, config, forumChannels, singleSessionChannels, pool, queues, semaphore, sendQueue, metrics, streamers, subscriptions } = input;
   if (!isAllowedInteraction(interaction, config)) {
     await interaction.reply({ content: "Keine Berechtigung für pi-Admin-Kommandos.", ephemeral: true });
     return;
@@ -291,7 +400,8 @@ async function handleAdminCommand(input: {
   if (subcommand === "status") {
     const status = pool.getStatus().slice(0, 10).map((entry) => {
       const queue = queues.get(entry.routeKey);
-      return `• ${entry.threadName} (${entry.threadId}): active=${entry.active}, running=${queue?.isRunning ?? false}, queue=${queue?.pendingCount ?? 0}, pending=${entry.pendingMessages}, session=${entry.sessionId?.slice(0, 8) ?? "-"}`;
+      const id = entry.kind === "forum-thread" ? `thread=${entry.threadId ?? "-"}` : `channel=${entry.channelId ?? "-"}`;
+      return `• ${entry.kind} ${entry.label} (${id}): active=${entry.active}, running=${queue?.isRunning ?? false}, queue=${queue?.pendingCount ?? 0}, pending=${entry.pendingMessages}, session=${entry.sessionId?.slice(0, 8) ?? "-"}`;
     });
     const uptimeSec = Math.round((Date.now() - metrics.startedAt.getTime()) / 1000);
     await interaction.reply({
@@ -309,18 +419,22 @@ async function handleAdminCommand(input: {
   }
 
   const thread = getInteractionThread(interaction);
-  if (!thread?.parentId) {
-    await interaction.reply({ content: "Dieses Kommando muss in einem konfigurierten Arbeits-Thread ausgeführt werden.", ephemeral: true });
+  const forum = thread?.parentId ? forumChannels.get(thread.parentId) : undefined;
+  const textConfig = interaction.channelId ? singleSessionChannels.get(interaction.channelId) : undefined;
+  const metadata = thread && forum
+    ? makeInteractionRouteMetadata(interaction, forum, thread)
+    : textConfig
+      ? makeTextInteractionRouteMetadata(interaction, textConfig)
+      : undefined;
+  if (!metadata) {
+    await interaction.reply({ content: "Dieses Kommando muss in einem konfigurierten Arbeits-Thread oder Single-Session-Textchannel ausgeführt werden.", ephemeral: true });
     return;
   }
-  const forum = forumChannels.get(thread.parentId);
-  if (!forum) {
-    await interaction.reply({ content: "Dieser Thread gehört zu keinem konfigurierten Arbeits-Forum.", ephemeral: true });
-    return;
-  }
-
-  const metadata = makeInteractionRouteMetadata(interaction, forum, thread);
   if (subcommand === "reset") {
+    subscriptions.get(metadata.routeKey)?.();
+    subscriptions.delete(metadata.routeKey);
+    streamers.get(metadata.routeKey)?.reset();
+    streamers.delete(metadata.routeKey);
     pool.reset(metadata.routeKey);
     queues.delete(metadata.routeKey);
     await pool.getOrCreate(metadata);
@@ -353,12 +467,28 @@ async function runBridge() {
   if (!token) throw new Error(`Env ${config.tokenEnv} fehlt`);
 
   const forumChannels = getForumChannels(config);
+  const singleSessionChannels = getSingleSessionChannels(config);
   const knowledgebaseChannels = getKnowledgebaseChannels(config);
-  if (forumChannels.size === 0) throw new Error("Keine forum Channels konfiguriert");
+  if (forumChannels.size === 0 && singleSessionChannels.size === 0) throw new Error("Keine forum oder single-session Channels konfiguriert");
 
   const metrics: Metrics = { prompts: 0, errors: 0, kbUpdates: 0, startedAt: new Date() };
-  const knowledgebase = new DiscordKnowledgebase();
-  const pool = new PiSessionPool({ cwd: config.cwd ?? cwd });
+  const knowledgebase = new DiscordKnowledgebase({
+    config: config.knowledgebase,
+    discord: config.discord,
+    redactionPatterns: config.redactionPatterns,
+  });
+  const subscriptions = new Map<string, () => void>();
+  const streamers = new Map<string, StreamingDiscordResponse>();
+  const pool = new PiSessionPool({
+    cwd: config.cwd ?? cwd,
+    idleDisposeMs: config.idleDisposeMs,
+    onDispose: (routeKey) => {
+      subscriptions.get(routeKey)?.();
+      subscriptions.delete(routeKey);
+      streamers.get(routeKey)?.reset();
+      streamers.delete(routeKey);
+    },
+  });
   const queues = new Map<string, ThreadQueue>();
   const semaphore = new Semaphore(config.maxConcurrentSessions ?? DEFAULT_MAX_CONCURRENT_SESSIONS);
   const sendQueue = new DiscordSendQueue();
@@ -379,7 +509,7 @@ async function runBridge() {
   client.on("interactionCreate", async (interaction) => {
     if (!interaction.isChatInputCommand() || interaction.commandName !== "pi") return;
     try {
-      await handleAdminCommand({ interaction, config, forumChannels, pool, queues, semaphore, sendQueue, metrics });
+      await handleAdminCommand({ interaction, config, forumChannels, singleSessionChannels, pool, queues, semaphore, sendQueue, metrics, streamers, subscriptions });
     } catch (error) {
       metrics.errors += 1;
       log("error", "admin command failed", { error: error instanceof Error ? error.message : String(error), userId: interaction.user.id });
@@ -407,13 +537,15 @@ async function runBridge() {
     if (!hasAllowedRole(message, config)) return;
 
     const thread = getThreadChannel(message);
-    if (!thread?.parentId) return;
-    const forum = forumChannels.get(thread.parentId);
-    if (!forum) return;
+    const forum = thread?.parentId ? forumChannels.get(thread.parentId) : undefined;
+    const textConfig = !thread ? singleSessionChannels.get(message.channelId) : undefined;
+    if (!forum && !textConfig) return;
+    if (!canSend(message.channel)) return;
     const normalized = normalizePrompt(message, config, client.user?.id);
     if (!normalized) return;
 
-    const metadata = makeRouteMetadata(message, forum, thread);
+    const metadata = thread && forum ? makeRouteMetadata(message, forum, thread) : makeTextRouteMetadata(message, textConfig!);
+    const routeChannel = message.channel as SendableChannel;
     const queue = queues.get(metadata.routeKey) ?? new ThreadQueue();
     queues.set(metadata.routeKey, queue);
 
@@ -421,16 +553,25 @@ async function runBridge() {
       await semaphore.run(async () => {
         try {
           metrics.prompts += 1;
-          if (config.discord.sendTyping) await thread.sendTyping().catch(() => undefined);
+          if (config.discord.sendTyping && "sendTyping" in routeChannel) await routeChannel.sendTyping().catch(() => undefined);
 
           const pooled = await pool.getOrCreate(metadata);
+          bindSessionDiscordEvents({
+            routeKey: metadata.routeKey,
+            session: pooled.session,
+            channel: routeChannel,
+            config,
+            sendQueue,
+            streamers,
+            subscriptions,
+          });
           const includeInitialContext = !pooled.mapping.initialized;
           const attachments = await normalizeDiscordAttachments(message, config.discord, config.redactionPatterns);
-          const kbContext = knowledgebase.buildContext(`${thread.name}\n${normalized}\n${attachments.promptSection ?? ""}`, {
+          const kbContext = knowledgebase.buildContext(`${metadata.threadName ?? metadata.channelName ?? ""}\n${normalized}\n${attachments.promptSection ?? ""}`, {
             forumIds: [...knowledgebaseChannels.keys()],
             limit: Math.max(1, ...[...knowledgebaseChannels.values()].map((channel) => channel.maxContextThreads ?? 3)),
           });
-          const prompt = buildPrompt(message, thread, forum, normalized, includeInitialContext, kbContext?.markdown, attachments.promptSection);
+          const prompt = buildPrompt(message, metadata, normalized, includeInitialContext, kbContext?.markdown, attachments.promptSection);
 
           await pooled.session.sendUserMessage(prompt, pooled.session.isStreaming ? { deliverAs: "followUp" } : undefined);
           pool.markInitialized(metadata.routeKey);
@@ -438,9 +579,9 @@ async function runBridge() {
           const answer = pooled.session.getLastAssistantText();
           if (answer?.trim()) {
             const safeAnswer = redactSecrets(answer, config.redactionPatterns);
-            await sendPayloads(sendQueue, thread as SendableChannel, renderDiscordMessages(safeAnswer, config.discord, {
-              title: `pi Antwort – ${thread.name}`,
-              context: `Discord Thread ${thread.id}`,
+            await sendPayloadsQueued(sendQueue, routeChannel, renderDiscordMessages(safeAnswer, config.discord, {
+              title: `pi Antwort – ${metadata.threadName ?? metadata.channelName ?? "Discord"}`,
+              context: metadata.kind === "forum-thread" ? `Discord Thread ${metadata.threadId}` : `Discord Channel ${metadata.channelId}`,
               preferMarkdownAttachments: true,
               sourceLinks: [discordMessageUrl(message), ...(attachments.sourceLinks ?? []), ...(kbContext?.sourceLinks ?? [])],
             }));
@@ -448,10 +589,19 @@ async function runBridge() {
         } catch (error) {
           metrics.errors += 1;
           log("error", "forum thread processing failed", { routeKey: metadata.routeKey, error: error instanceof Error ? error.message : String(error) });
-          await sendPayloads(sendQueue, thread as SendableChannel, renderErrorMessage(redactSecrets(error instanceof Error ? error.message : String(error), config.redactionPatterns)));
+          await sendPayloadsQueued(sendQueue, routeChannel, renderErrorMessage(redactSecrets(error instanceof Error ? error.message : String(error), config.redactionPatterns)));
         }
       });
     });
+  });
+
+  client.on("threadUpdate", (_oldThread, newThread) => {
+    if (!newThread.parentId || !forumChannels.has(newThread.parentId)) return;
+    const routeKey = buildForumRouteKey({ guildId: newThread.guildId, forumId: newThread.parentId, threadId: newThread.id });
+    if (newThread.archived) {
+      pool.disposeRoute(routeKey);
+      log("info", "archived thread session disposed", { routeKey });
+    }
   });
 
   client.on("messageUpdate", async (_oldMessage, newMessage) => {
@@ -468,6 +618,8 @@ async function runBridge() {
 
   const shutdown = async () => {
     log("info", "discord bridge daemon shutting down");
+    for (const unsubscribe of subscriptions.values()) unsubscribe();
+    streamers.clear();
     pool.dispose();
     await client.destroy();
     process.exit(0);

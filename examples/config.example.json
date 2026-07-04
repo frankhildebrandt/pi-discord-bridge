@@ -4,6 +4,8 @@
   "allowedUserIds": [],
   "requireMention": false,
   "prefix": "!pi",
+  "maxConcurrentSessions": 3,
+  "idleDisposeMs": 1800000,
   "channels": [
     {
       "channelId": "123456789012345678",
@@ -22,9 +24,18 @@
       "maxContextThreads": 5
     }
   ],
+  "knowledgebase": {
+    "downloadAttachments": true,
+    "maxAttachmentBytes": 262144,
+    "enableVectorSearch": false,
+    "maxStoredThreadChars": 500000
+  },
   "discord": {
     "sendTyping": true,
     "streamUpdates": false,
+    "streamUpdateIntervalMs": 5000,
+    "postToolEvents": false,
+    "maxToolOutputChars": 4000,
     "maxMessageChars": 1900,
     "maxCodeCharsInline": 900,
     "largeCodeAsAttachment": true,

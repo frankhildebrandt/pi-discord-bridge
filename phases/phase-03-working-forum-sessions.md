@@ -1,5 +1,7 @@
 # Phase 3 – Arbeits-Forum: Thread = pi-Session
 
+Status: ✅ implementiert
+
 ## Ziel
 
 Discord-Arbeitsforen sollen unterstützt werden. Jeder Thread in einem konfigurierten Arbeits-Forum repräsentiert eine eigene pi-Session.

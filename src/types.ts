@@ -29,6 +29,9 @@ export type DiscordBridgeChannelConfig =
 export interface DiscordRenderingConfig {
   sendTyping: boolean;
   streamUpdates: boolean;
+  streamUpdateIntervalMs?: number;
+  postToolEvents?: boolean;
+  maxToolOutputChars?: number;
   maxMessageChars: number;
   maxCodeCharsInline: number;
   largeCodeAsAttachment: boolean;
@@ -37,13 +40,22 @@ export interface DiscordRenderingConfig {
   downloadAttachments?: boolean;
 }
 
+export interface KnowledgebaseConfig {
+  downloadAttachments?: boolean;
+  maxAttachmentBytes?: number;
+  enableVectorSearch?: boolean;
+  maxStoredThreadChars?: number;
+}
+
 export interface DiscordBridgeConfig {
   tokenEnv: string;
   clientId?: string;
   guildId?: string;
   cwd?: string;
   maxConcurrentSessions?: number;
+  idleDisposeMs?: number;
   redactionPatterns?: string[];
+  knowledgebase?: KnowledgebaseConfig;
   allowedUserIds: string[];
   allowedRoleIds: string[];
   requireMention: boolean;
