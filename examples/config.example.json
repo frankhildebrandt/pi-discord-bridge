@@ -27,6 +27,27 @@
     "streamUpdates": false,
     "maxMessageChars": 1900,
     "maxCodeCharsInline": 900,
-    "largeCodeAsAttachment": true
+    "largeCodeAsAttachment": true,
+    "downloadAttachments": true,
+    "maxAttachmentBytes": 262144,
+    "allowedAttachmentMimeTypes": [
+      "text/plain",
+      "text/markdown",
+      "text/csv",
+      "application/json",
+      "application/xml",
+      "text/xml",
+      "text/yaml",
+      "application/yaml",
+      "application/x-yaml",
+      "application/javascript",
+      "text/javascript",
+      "text/css",
+      "text/html",
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif"
+    ]
   }
 }

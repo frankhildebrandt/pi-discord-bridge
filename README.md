@@ -2,12 +2,13 @@
 
 Discord-Bridge für pi.dev als pi-Extension und als Standalone-Bridge-Daemon.
 
-Aktueller Stand: **MVP+ / Phasen 1–5 größtenteils implementiert**.
+Aktueller Stand: **Phasen 1–6 implementiert, Phase 7–9 offen**.
 
 - Extension-Modus: Single-Session-Textchannels.
 - Bridge-Daemon: Discord-Arbeitsforen, ein Thread = eine pi-Session.
 - Optionales Knowledgebase-Forum mit lokalem Markdown-Index und Keyword-Retrieval.
 - Discord-gerechtes Rendering mit Chunks, Embeds und Markdown-Attachments.
+- Discord-Anhänge als Prompt-Kontext: kleine Text-/Markdown-/Code-Dateien werden eingebettet, Bilder als Links/Metadaten weitergereicht.
 - Admin-Kommandos, Rate-Limit-Queue und Secret-Redaction.
 
 ## Installation
@@ -49,7 +50,7 @@ Minimal für den Extension-Modus:
 }
 ```
 
-Beispiel für Forum-Bridge plus Knowledgebase:
+Beispiel für Forum-Bridge plus Knowledgebase und Attachment-Verarbeitung:
 
 ```json
 {
@@ -79,7 +80,21 @@ Beispiel für Forum-Bridge plus Knowledgebase:
     "streamUpdates": false,
     "maxMessageChars": 1900,
     "maxCodeCharsInline": 900,
-    "largeCodeAsAttachment": true
+    "largeCodeAsAttachment": true,
+    "downloadAttachments": true,
+    "maxAttachmentBytes": 262144,
+    "allowedAttachmentMimeTypes": [
+      "text/plain",
+      "text/markdown",
+      "application/json",
+      "text/javascript",
+      "text/css",
+      "text/html",
+      "image/png",
+      "image/jpeg",
+      "image/webp",
+      "image/gif"
+    ]
   },
   "redactionPatterns": []
 }
@@ -125,7 +140,10 @@ Ablauf:
 1. pi startet die Extension bei `session_start`.
 2. Die Extension verbindet sich mit Discord.
 3. Nachrichten in konfigurierten `single-session` Channels werden nach Prefix/Mention/User-/Rollenprüfung als pi-Prompt gesendet.
-4. Die finale Assistant-Antwort wird nach Discord gerendert.
+4. Text-/Code-Attachments werden bei erlaubtem Typ und passender Größe in den Prompt eingebettet; Bilder werden als Links/Metadaten ergänzt.
+5. Die finale Assistant-Antwort wird nach Discord gerendert.
+
+Hinweis: Wenn `prefix` gesetzt ist, müssen auch Nachrichten mit Attachments den Prefix enthalten. Attachment-only Nachrichten funktionieren ohne Prefix-Config oder mit gültiger Mention-Konfiguration.
 
 ## Nutzung: Bridge-Daemon für Foren
 
@@ -147,6 +165,7 @@ Ablauf:
 - Pro Thread werden Nachrichten sequentiell verarbeitet.
 - Mehrere Threads laufen parallel bis `maxConcurrentSessions`.
 - Der Thread-Titel wird als pi-Session-Name verwendet.
+- Attachments aus Arbeits-Threads werden wie im Extension-Modus in den Prompt aufgenommen.
 
 ## Knowledgebase-Forum
 
@@ -159,6 +178,25 @@ Channels mit `mode: "knowledgebase"` werden nicht als Arbeits-Threads benutzt. S
 ```
 
 Bei Prompts in Arbeitschannels/-threads sucht die Bridge relevante KB-Threads per Keyword-Scoring und injiziert kurze Auszüge plus Quellenlinks in den Prompt.
+
+Aktuell werden KB-Thread-Nachrichten und Attachment-Links erfasst; KB-Attachments werden noch nicht inhaltlich heruntergeladen und indexiert.
+
+## Attachment-Verarbeitung
+
+Gemeinsame Logik in `src/attachments.ts`:
+
+- Discord-Attachment-Metadaten werden erfasst: Name, URL, Größe, Content-Type.
+- Kleine Text-/Markdown-/Code-Dateien werden heruntergeladen und im Prompt unter `Discord-Anhänge` eingebettet.
+- Downloads haben Timeout und Größenlimit.
+- Nicht erlaubte, zu große oder fehlerhafte Anhänge werden nicht heruntergeladen, sondern im Prompt als ignoriert/verlinkt markiert.
+- Bilder (`png`, `jpeg`, `webp`, `gif`) werden derzeit als Discord-Link/Metadaten weitergereicht, nicht multimodal als Bilddaten.
+- Heruntergeladene Textinhalte werden vor Verwendung mit den Redaction-Regeln maskiert.
+
+Wichtige Config-Werte:
+
+- `discord.downloadAttachments` – Downloads aktivieren/deaktivieren, Default `true`.
+- `discord.maxAttachmentBytes` – maximale Downloadgröße, Default `262144`.
+- `discord.allowedAttachmentMimeTypes` – erlaubte MIME-Typen.
 
 ## Rendering
 
@@ -189,14 +227,15 @@ Modell, Provider, Thinking-Level und API-Keys können über Discord weder gelese
 - Optional Prefix- und/oder Mention-Pflicht.
 - Projektlokale Config wird nur bei trusted project gelesen.
 - Redaction für bekannte Secret-Muster und optionale eigene Regexe (`redactionPatterns`).
+- Attachment-Downloads sind typ- und größengeprüft.
 
 ## Aktuelle Einschränkungen
 
 Nicht alle Punkte aus `DESIGN.md` sind vollständig umgesetzt:
 
-- Discord-Attachments/Bilder als Eingabe an pi werden noch nicht verarbeitet.
+- Bildanhänge werden noch nicht multimodal an pi übergeben, sondern als Link/Metadaten.
 - Streaming nach Discord ist nur gepuffert vorbereitet; produktiv wird final nach `message_end`/Session-Antwort gepostet.
-- Tool-Execution-Events werden im Extension-Modus noch nicht automatisch nach Discord gepostet.
+- Tool-Execution-Events werden noch nicht automatisch nach Discord gepostet.
 - Knowledgebase nutzt Keyword-Scoring, keine Embeddings/Vektorindexe.
 - Knowledgebase lädt Anhänge nicht inhaltlich herunter, sondern verlinkt sie.
 - Archivierungs-/Idle-Dispose-Verhalten für Forum-Threads ist rudimentär.
@@ -208,3 +247,11 @@ Nicht alle Punkte aus `DESIGN.md` sind vollständig umgesetzt:
 npm run typecheck
 npm run bridge
 ```
+
+Phasen automatisiert ausführen:
+
+```bash
+START_PHASE=7 END_PHASE=7 scripts/run-phases.sh
+```
+
+`scripts/run-phases.sh` startet pi standardmäßig mit `--verbose`. Mit `PI_VERBOSE=0` lässt sich das deaktivieren.
