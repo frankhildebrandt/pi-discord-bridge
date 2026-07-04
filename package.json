@@ -1,0 +1,26 @@
+{
+  "name": "pi-discord-bridge",
+  "version": "0.1.0",
+  "description": "Discord bridge extension and daemon for pi.dev",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "bridge": "tsx src/bridge.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "discord.js": "^14.16.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0",
+    "tsx": "^4.20.3"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  }
+}

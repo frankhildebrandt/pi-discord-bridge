@@ -1,0 +1,32 @@
+{
+  "tokenEnv": "DISCORD_BOT_TOKEN",
+  "guildId": "123456789012345678",
+  "allowedUserIds": [],
+  "requireMention": false,
+  "prefix": "!pi",
+  "channels": [
+    {
+      "channelId": "123456789012345678",
+      "mode": "single-session",
+      "sessionName": "discord-main"
+    },
+    {
+      "channelId": "234567890123456789",
+      "mode": "forum",
+      "sessionNamePrefix": "forum-"
+    },
+    {
+      "channelId": "345678901234567890",
+      "mode": "knowledgebase",
+      "indexName": "discord-kb",
+      "maxContextThreads": 5
+    }
+  ],
+  "discord": {
+    "sendTyping": true,
+    "streamUpdates": false,
+    "maxMessageChars": 1900,
+    "maxCodeCharsInline": 900,
+    "largeCodeAsAttachment": true
+  }
+}
